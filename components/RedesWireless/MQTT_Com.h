@@ -16,7 +16,13 @@ void mqtt_app_start(void);
 
 /**
  * @brief Publica uma mensagem MQTT para o tópico especificado.
- * @param topico O tópico MQTT para publicar a mensagem.
- * @param payload O conteúdo da mensagem a ser publicada.
+ * @param topico O tópico MQTT para publicar a mensagem
+ * @param payload O conteúdo da mensagem a ser publicada
  */
 void mqtt_publicar_mensagem(const char* topico, const char* payload);
+
+/**
+ * @brief Atualiza o intervalo de telemetria com o valor recebido via MQTT.
+ * @param segundos O novo intervalo em segundos
+ */
+void atualizar_intervalo_telemetria(int segundos);

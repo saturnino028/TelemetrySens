@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,7 +13,9 @@
 #include "esp_crt_bundle.h"
 
 #include "MQTT_Com.h"
-#include "Credenciais.h" // Acesse as instruções em Credenciais_ex.h para configurar suas credenciais de Wi-Fi e MQTT
+#include "Credenciais.h" 
+
+extern volatile uint32_t intervalo_telemetria_ms;
 
 static const char *TAG_WIFI = "WIFI_STA";
 static const char *TAG_MQTT = "MQTT_CLIENT";
@@ -39,7 +42,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
 }
 
 void wifi_init_sta(void) {
-    // Inicializa o NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -49,20 +51,16 @@ void wifi_init_sta(void) {
 
     s_wifi_event_group = xEventGroupCreate();
 
-    // Inicializa a pilha de rede LwIP
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
-    // Configura o Wi-Fi com os parâmetros padrão
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Registra os callbacks
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 
-    // Aplica as credenciais
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = WIFI_SSID,
@@ -76,7 +74,6 @@ void wifi_init_sta(void) {
 
     ESP_LOGI(TAG_WIFI, "Inicialização do Wi-Fi concluída. Aguardando conexão...");
 
-    // Aguarda até conectar ou falhar
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 }
 
@@ -86,6 +83,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG_MQTT, "Conectado ao Broker MQTT!");
+            // Se inscreve para receber comandos de configuração remota
+            esp_mqtt_client_subscribe(client, "telemetry_conf", 1);
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG_MQTT, "Desconectado do Broker MQTT");
@@ -93,6 +92,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         case MQTT_EVENT_DATA:
             ESP_LOGI(TAG_MQTT, "Mensagem recebida. Tópico: %.*s | Payload: %.*s", 
                      event->topic_len, event->topic, event->data_len, event->data);
+            
+            // Verifica se a mensagem chegou no tópico de telemetria
+            if (strncmp(event->topic, "telemetry_conf", event->topic_len) == 0) {
+                char payload_str[16] = {0};
+                snprintf(payload_str, sizeof(payload_str), "%.*s", event->data_len, event->data);
+                
+                int novo_tempo_sec = atoi(payload_str);
+                atualizar_intervalo_telemetria(novo_tempo_sec);
+            }
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGE(TAG_MQTT, "Erro no cliente MQTT");
@@ -107,7 +115,7 @@ void mqtt_app_start(void) {
         .broker.address.uri = BROKER_URI, 
         .credentials.username = BROKER_USER,
         .credentials.authentication.password = BROKER_PASS,
-        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach, // Habilita a validação TLS automática
+        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     client = esp_mqtt_client_init(&mqtt_cfg);
@@ -119,5 +127,28 @@ void mqtt_publicar_mensagem(const char* topico, const char* payload) {
     if (client != NULL) {
         int msg_id = esp_mqtt_client_publish(client, topico, payload, 0, 1, 0);
         ESP_LOGI(TAG_MQTT, "Mensagem enviada, ID: %d", msg_id);
+    }
+}
+
+void atualizar_intervalo_telemetria(int segundos) {
+    if (segundos >= 1 && segundos <= 3600) {
+        intervalo_telemetria_ms = segundos * 1000;
+        ESP_LOGI("MAIN", "Novo intervalo de telemetria configurado: %lu ms", intervalo_telemetria_ms);
+
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        char timestamp[32];
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+        char json_metadados[128];
+        snprintf(json_metadados, sizeof(json_metadados),
+                 "{\"evento\": \"intervalo_alterado\", \"novo_tempo_seg\": %d, \"data_hora\": \"%s\"}",
+                 segundos, timestamp);
+
+        mqtt_publicar_mensagem("metadados", json_metadados);
+    } else {
+        ESP_LOGW("MAIN", "Tempo invalido recebido via MQTT. Ignorado.");
     }
 }
